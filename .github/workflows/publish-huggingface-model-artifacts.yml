@@ -7,11 +7,6 @@ on:
         description: Newline- or comma-separated model ids. Use @revision to pin a revision.
         required: true
         type: string
-      artifact_prefix:
-        description: Prefix used when naming uploaded artifacts.
-        required: false
-        default: huggingface-model
-        type: string
       include_patterns:
         description: Optional allow-list patterns, comma- or newline-separated.
         required: false
@@ -43,9 +38,8 @@ jobs:
         shell: bash
         env:
           MODEL_SPECS: ${{ inputs.models }}
-          ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
         run: |
-          matrix_json="$(python scripts/huggingface_artifacts.py plan --models "$MODEL_SPECS" --artifact-prefix "$ARTIFACT_PREFIX")"
+          matrix_json="$(python scripts/huggingface_artifacts.py plan --models "$MODEL_SPECS")"
           {
             echo 'matrix<<EOF'
             echo "$matrix_json"
@@ -97,4 +91,3 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
-

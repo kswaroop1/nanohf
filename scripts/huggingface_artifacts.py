@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-DEFAULT_ARTIFACT_PREFIX = ""
 INVALID_ARTIFACT_CHARACTERS = '"<>|*?:\\/\r\n'
 
 
@@ -41,10 +40,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--models",
         required=True,
         help="Newline- or comma-separated model ids. Use @revision to pin a revision.")
-    plan_parser.add_argument(
-        "--artifact-prefix",
-        default=DEFAULT_ARTIFACT_PREFIX,
-        help="Optional prefix used when naming uploaded artifacts.")
     plan_parser.set_defaults(handler=run_plan)
 
     download_parser = subparsers.add_parser(
@@ -68,10 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Artifact name written into the generated manifest.")
     download_parser.add_argument(
-        "--artifact-prefix",
-        default=DEFAULT_ARTIFACT_PREFIX,
-        help="Optional prefix used when artifact-name is omitted.")
-    download_parser.add_argument(
         "--include-patterns",
         default="",
         help="Optional allow-list patterns, comma- or newline-separated.")
@@ -89,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_plan(args: argparse.Namespace) -> int:
-    requests = build_model_requests(args.models, args.artifact_prefix)
+    requests = build_model_requests(args.models)
     payload = {"include": [asdict(request) for request in requests]}
     json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
@@ -111,7 +102,7 @@ def run_download(args: argparse.Namespace) -> int:
     exclude_patterns = split_values(args.exclude_patterns)
     destination_root = Path(args.destination_root).expanduser().resolve()
     storage_name = args.storage_name or build_storage_name(args.repo_id, revision)
-    artifact_name = args.artifact_name or build_artifact_name(args.repo_id, revision, args.artifact_prefix)
+    artifact_name = args.artifact_name or build_artifact_name(args.repo_id, revision)
     destination_path = destination_root / storage_name
     cache_dir = destination_root / ".hf-cache"
 
@@ -152,7 +143,7 @@ def run_download(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_model_requests(raw_models: str, artifact_prefix: str) -> list[ModelRequest]:
+def build_model_requests(raw_models: str) -> list[ModelRequest]:
     requests: list[ModelRequest] = []
     seen_specs: set[str] = set()
 
@@ -167,7 +158,7 @@ def build_model_requests(raw_models: str, artifact_prefix: str) -> list[ModelReq
             repo_id=repo_id,
             revision=revision,
             storage_name=build_storage_name(repo_id, revision),
-            artifact_name=build_artifact_name(repo_id, revision, artifact_prefix)))
+            artifact_name=build_artifact_name(repo_id, revision)))
 
     if not requests:
         raise ValueError("At least one model id must be supplied.")
@@ -203,11 +194,8 @@ def build_storage_name(repo_id: str, revision: str) -> str:
     return slugify(format_model_spec(repo_id, revision))
 
 
-def build_artifact_name(repo_id: str, revision: str, prefix: str) -> str:
+def build_artifact_name(repo_id: str, revision: str) -> str:
     name = format_model_spec(repo_id, revision)
-    if normalize_optional(prefix):
-        name = f"{prefix}{name}"
-
     escaped = ''.join(escape_artifact_character(character) for character in name)
     return escaped.rstrip(' .') or 'artifact'
 
