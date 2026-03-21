@@ -1,0 +1,99 @@
+name: Publish Hugging Face Model Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: Newline- or comma-separated model ids. Use @revision to pin a revision.
+        required: true
+        type: string
+      artifact_prefix:
+        description: Prefix used when naming uploaded artifacts.
+        required: false
+        default: huggingface-model
+        type: string
+      include_patterns:
+        description: Optional allow-list patterns, comma- or newline-separated.
+        required: false
+        type: string
+      exclude_patterns:
+        description: Optional deny-list patterns, comma- or newline-separated.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build download matrix
+        id: plan
+        shell: bash
+        env:
+          MODEL_SPECS: ${{ inputs.models }}
+          ARTIFACT_PREFIX: ${{ inputs.artifact_prefix }}
+        run: |
+          matrix_json="$(python scripts/huggingface_artifacts.py plan --models "$MODEL_SPECS" --artifact-prefix "$ARTIFACT_PREFIX")"
+          {
+            echo 'matrix<<EOF'
+            echo "$matrix_json"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+  download:
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/requirements-huggingface-artifacts.txt
+
+      - name: Install download dependency
+        run: python -m pip install -r scripts/requirements-huggingface-artifacts.txt
+
+      - name: Download model snapshot
+        id: download
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          INCLUDE_PATTERNS: ${{ inputs.include_patterns }}
+          EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
+        run: |
+          python scripts/huggingface_artifacts.py download \
+            --repo-id "${{ matrix.model.repo_id }}" \
+            --revision "${{ matrix.model.revision }}" \
+            --destination-root "$RUNNER_TEMP/huggingface-models" \
+            --storage-name "${{ matrix.model.storage_name }}" \
+            --artifact-name "${{ matrix.model.artifact_name }}" \
+            --include-patterns "$INCLUDE_PATTERNS" \
+            --exclude-patterns "$EXCLUDE_PATTERNS"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.model.artifact_name }}
+          path: ${{ steps.download.outputs.artifact_path }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 14
