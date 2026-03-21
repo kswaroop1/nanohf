@@ -19,7 +19,6 @@ INVALID_ASSET_CHARACTERS = '"<>|*?:\\/\r\n'
 @dataclass(frozen=True)
 class ModelPackage:
     model: str
-    version: str
     repo_id: str
     revision: str
     storage_name: str
@@ -47,10 +46,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         required=True,
         help="Single Hugging Face model id. Use @revision to pin a revision.")
-    describe_parser.add_argument(
-        "--version",
-        required=True,
-        help="Release version prefix such as v0.1.0.")
     describe_parser.set_defaults(handler=run_describe)
 
     package_parser = subparsers.add_parser(
@@ -60,10 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         required=True,
         help="Single Hugging Face model id. Use @revision to pin a revision.")
-    package_parser.add_argument(
-        "--version",
-        required=True,
-        help="Release version prefix such as v0.1.0.")
     package_parser.add_argument(
         "--destination-root",
         required=True,
@@ -86,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_describe(args: argparse.Namespace) -> int:
-    package = build_model_package(args.model, args.version)
+    package = build_model_package(args.model)
     json.dump(asdict(package), sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
@@ -101,7 +92,7 @@ def run_package(args: argparse.Namespace) -> int:
             file=sys.stderr)
         return 2
 
-    package = build_model_package(args.model, args.version)
+    package = build_model_package(args.model)
     token = normalize_optional(args.token) or normalize_optional(os.getenv("HF_TOKEN"))
     include_patterns = split_values(args.include_patterns)
     exclude_patterns = split_values(args.exclude_patterns)
@@ -128,7 +119,6 @@ def run_package(args: argparse.Namespace) -> int:
 
     manifest = {
         "model": package.model,
-        "version": package.version,
         "repo_id": package.repo_id,
         "requested_revision": package.revision or None,
         "resolved_revision": snapshot_path.name,
@@ -163,23 +153,20 @@ def run_package(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_model_package(raw_model: str, raw_version: str) -> ModelPackage:
+def build_model_package(raw_model: str) -> ModelPackage:
     repo_id, revision = parse_model_spec(raw_model)
-    version = parse_version(raw_version)
     model = format_model_spec(repo_id, revision)
     asset_name = build_asset_name(repo_id, revision)
-    release_tag = f"{version}+{model}"
-    validate_release_tag(release_tag)
+    validate_release_tag(model)
     return ModelPackage(
         model=model,
-        version=version,
         repo_id=repo_id,
         revision=revision,
         storage_name=build_storage_name(repo_id, revision),
         asset_name=asset_name,
         asset_filename=f"{asset_name}.zip",
-        release_tag=release_tag,
-        release_title=release_tag)
+        release_tag=model,
+        release_title=model)
 
 
 def parse_model_spec(spec: str) -> tuple[str, str]:
@@ -204,17 +191,6 @@ def parse_model_spec(spec: str) -> tuple[str, str]:
         raise ValueError(f"Invalid model id '{repo_id}'.")
 
     return repo_id, revision
-
-
-def parse_version(version: str) -> str:
-    candidate = normalize_optional(version)
-    if not candidate:
-        raise ValueError("Version must not be empty.")
-
-    if any(character.isspace() for character in candidate):
-        raise ValueError("Version must not contain whitespace.")
-
-    return candidate
 
 
 def build_storage_name(repo_id: str, revision: str) -> str:
@@ -246,7 +222,6 @@ def build_release_notes(package: ModelPackage, manifest: dict[str, object]) -> s
     requested_revision = manifest["requested_revision"] or "default"
     return (
         f"# {package.release_title}\n\n"
-        f"- Version: {package.version}\n"
         f"- Source: https://huggingface.co/{package.repo_id}\n"
         f"- Requested revision: {requested_revision}\n"
         f"- Resolved revision: {manifest['resolved_revision']}\n"
