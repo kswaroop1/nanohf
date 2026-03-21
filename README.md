@@ -1,22 +1,34 @@
 # nanohf
 
 `nanohf` is a small GitHub Actions repo for downloading Hugging Face model
-snapshots and publishing them as GitHub Actions artifacts.
+snapshots, wrapping them in a predictable directory structure, and publishing
+one zip file per model as a GitHub release asset.
 
 ## What It Does
 
 The manual workflow at `.github/workflows/publish-huggingface-model-artifacts.yml`
-accepts one or more Hugging Face model ids, downloads each snapshot with
-`huggingface_hub`, and uploads each one as a separate GitHub Actions artifact.
+accepts a single Hugging Face model id, downloads that snapshot with
+`huggingface_hub`, builds a zip whose internal layout starts with the original
+repo path, and uploads that zip to a GitHub release dedicated to that model.
 
-Each uploaded artifact includes a `huggingface-artifact.json` manifest with the
-source `repo_id`, requested revision, resolved revision, and file count.
+Example internal zip layout for `tobil/qmd-query-expansion-1.7B-gguf`:
+
+```text
+tobil/
+  qmd-query-expansion-1.7B-gguf/
+    huggingface-model.json
+    ...model files...
+```
+
+Each run manages one model release. Re-running the same model updates that
+model's release and replaces its zip asset in place, so the process is
+incremental at the model level rather than appending every model to one shared
+release.
 
 ## Workflow Inputs
 
-- `models`: Newline- or comma-separated model ids. Append `@revision` to pin a
-  branch, tag, or commit.
-- `artifact_prefix`: Prefix used when naming uploaded artifacts.
+- `model`: Single Hugging Face model id. Append `@revision` to pin a branch,
+  tag, or commit.
 - `include_patterns`: Optional allow-list patterns passed to
   `huggingface_hub.snapshot_download`.
 - `exclude_patterns`: Optional deny-list patterns passed to
@@ -28,20 +40,27 @@ models.
 ## Example
 
 ```text
-sentence-transformers/all-MiniLM-L6-v2
-openai/whisper-tiny@main
+openai/whisper-tiny
 ```
+
+## Release Shape
+
+For a model like `openai/whisper-tiny`, the workflow creates or updates:
+
+- release tag: `model-openai-whisper-tiny`
+- release title: `openai/whisper-tiny`
+- zip asset: `openai%2Fwhisper-tiny.zip`
 
 ## Local Helper
 
 The workflow uses `scripts/huggingface_artifacts.py` to:
 
-- turn the `models` input into a GitHub Actions matrix
-- download one model snapshot per job
-- write the manifest consumed with the artifact
+- parse one model spec
+- package the downloaded snapshot into a zip
+- write release metadata and notes for the workflow
 
-You can smoke-test the planning path locally:
+You can smoke-test the release mapping locally:
 
 ```powershell
-python scripts\huggingface_artifacts.py plan --models "gpt2,openai/whisper-tiny@main"
+python scripts\huggingface_artifacts.py describe --model "openai/whisper-tiny@main"
 ```

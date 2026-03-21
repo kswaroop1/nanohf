@@ -1,10 +1,10 @@
-name: Publish Hugging Face Model Artifacts
+name: Publish Hugging Face Release Asset
 
 on:
   workflow_dispatch:
     inputs:
-      models:
-        description: Newline- or comma-separated model ids. Use @revision to pin a revision.
+      model:
+        description: Single Hugging Face model id. Use @revision to pin a revision.
         required: true
         type: string
       include_patterns:
@@ -17,41 +17,11 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  plan:
+  publish:
     runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Build download matrix
-        id: plan
-        shell: bash
-        env:
-          MODEL_SPECS: ${{ inputs.models }}
-        run: |
-          matrix_json="$(python scripts/huggingface_artifacts.py plan --models "$MODEL_SPECS")"
-          {
-            echo 'matrix<<EOF'
-            echo "$matrix_json"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-  download:
-    needs: plan
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,31 +33,47 @@ jobs:
           cache: pip
           cache-dependency-path: scripts/requirements-huggingface-artifacts.txt
 
-      - name: Install download dependency
+      - name: Install packaging dependency
         run: python -m pip install -r scripts/requirements-huggingface-artifacts.txt
 
-      - name: Download model snapshot
-        id: download
+      - name: Package model release zip
+        id: package
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           INCLUDE_PATTERNS: ${{ inputs.include_patterns }}
           EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
+          MODEL: ${{ inputs.model }}
         run: |
-          python scripts/huggingface_artifacts.py download \
-            --repo-id "${{ matrix.repo_id }}" \
-            --revision "${{ matrix.revision }}" \
-            --destination-root "$RUNNER_TEMP/huggingface-models" \
-            --storage-name "${{ matrix.storage_name }}" \
-            --artifact-name "${{ matrix.artifact_name }}" \
+          python scripts/huggingface_artifacts.py package \
+            --model "$MODEL" \
+            --destination-root "$RUNNER_TEMP/model-package" \
             --include-patterns "$INCLUDE_PATTERNS" \
             --exclude-patterns "$EXCLUDE_PATTERNS"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ steps.download.outputs.artifact_path }}
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 14
+      - name: Ensure release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.package.outputs.release_title }}
+          RELEASE_NOTES_PATH: ${{ steps.package.outputs.release_notes_path }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_NOTES_PATH"
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RELEASE_NOTES_PATH"
+          fi
+
+      - name: Upload release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
+        run: |
+          gh release upload "$RELEASE_TAG" "$ASSET_PATH" --clobber
