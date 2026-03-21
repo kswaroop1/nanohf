@@ -11,7 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
-DEFAULT_ARTIFACT_PREFIX = "huggingface-model"
+DEFAULT_ARTIFACT_PREFIX = ""
+INVALID_ARTIFACT_CHARACTERS = '"<>|*?:\\/\r\n'
 
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     plan_parser.add_argument(
         "--artifact-prefix",
         default=DEFAULT_ARTIFACT_PREFIX,
-        help="Prefix used when naming uploaded artifacts.")
+        help="Optional prefix used when naming uploaded artifacts.")
     plan_parser.set_defaults(handler=run_plan)
 
     download_parser = subparsers.add_parser(
@@ -69,7 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser.add_argument(
         "--artifact-prefix",
         default=DEFAULT_ARTIFACT_PREFIX,
-        help="Fallback prefix used when artifact-name is omitted.")
+        help="Optional prefix used when artifact-name is omitted.")
     download_parser.add_argument(
         "--include-patterns",
         default="",
@@ -110,8 +111,7 @@ def run_download(args: argparse.Namespace) -> int:
     exclude_patterns = split_values(args.exclude_patterns)
     destination_root = Path(args.destination_root).expanduser().resolve()
     storage_name = args.storage_name or build_storage_name(args.repo_id, revision)
-    artifact_prefix = normalize_prefix(args.artifact_prefix)
-    artifact_name = args.artifact_name or f"{artifact_prefix}-{storage_name}"
+    artifact_name = args.artifact_name or build_artifact_name(args.repo_id, revision, args.artifact_prefix)
     destination_path = destination_root / storage_name
     cache_dir = destination_root / ".hf-cache"
 
@@ -153,7 +153,6 @@ def run_download(args: argparse.Namespace) -> int:
 
 
 def build_model_requests(raw_models: str, artifact_prefix: str) -> list[ModelRequest]:
-    normalized_prefix = normalize_prefix(artifact_prefix)
     requests: list[ModelRequest] = []
     seen_specs: set[str] = set()
 
@@ -164,12 +163,11 @@ def build_model_requests(raw_models: str, artifact_prefix: str) -> list[ModelReq
             continue
 
         seen_specs.add(canonical_spec)
-        storage_name = build_storage_name(repo_id, revision)
         requests.append(ModelRequest(
             repo_id=repo_id,
             revision=revision,
-            storage_name=storage_name,
-            artifact_name=f"{normalized_prefix}-{storage_name}"))
+            storage_name=build_storage_name(repo_id, revision),
+            artifact_name=build_artifact_name(repo_id, revision, artifact_prefix)))
 
     if not requests:
         raise ValueError("At least one model id must be supplied.")
@@ -205,13 +203,24 @@ def build_storage_name(repo_id: str, revision: str) -> str:
     return slugify(format_model_spec(repo_id, revision))
 
 
+def build_artifact_name(repo_id: str, revision: str, prefix: str) -> str:
+    name = format_model_spec(repo_id, revision)
+    if normalize_optional(prefix):
+        name = f"{prefix}{name}"
+
+    escaped = ''.join(escape_artifact_character(character) for character in name)
+    return escaped.rstrip(' .') or 'artifact'
+
+
+def escape_artifact_character(character: str) -> str:
+    if character in INVALID_ARTIFACT_CHARACTERS:
+        return f"%{ord(character):02X}"
+
+    return character
+
+
 def format_model_spec(repo_id: str, revision: str) -> str:
     return f"{repo_id}@{revision}" if revision else repo_id
-
-
-def normalize_prefix(prefix: str) -> str:
-    normalized = slugify(prefix)
-    return normalized or DEFAULT_ARTIFACT_PREFIX
 
 
 def normalize_optional(value: str | None) -> str:
