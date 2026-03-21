@@ -7,9 +7,10 @@ one zip file per model as a GitHub release asset.
 ## What It Does
 
 The manual workflow at `.github/workflows/publish-huggingface-model-artifacts.yml`
-accepts a single Hugging Face model id, downloads that snapshot with
-`huggingface_hub`, builds a zip whose internal layout starts with the original
-repo path, and uploads that zip to a GitHub release dedicated to that model.
+accepts a release `version` plus a single Hugging Face `model` id, downloads
+that snapshot with `huggingface_hub`, builds a zip whose internal layout starts
+with the original repo path, and uploads that zip to a GitHub release whose tag
+and title combine the version and model id.
 
 Example internal zip layout for `tobil/qmd-query-expansion-1.7B-gguf`:
 
@@ -20,13 +21,13 @@ tobil/
     ...model files...
 ```
 
-Each run manages one model release. Re-running the same model updates that
-model's release and replaces its zip asset in place, so the process is
-incremental at the model level rather than appending every model to one shared
-release.
+Each run manages one `(version, model)` release. Re-running the same version and
+model updates that release and replaces its zip asset in place. Changing the
+version creates a new release for the same model.
 
 ## Workflow Inputs
 
+- `version`: Release version prefix such as `v0.1.0`.
 - `model`: Single Hugging Face model id. Append `@revision` to pin a branch,
   tag, or commit.
 - `include_patterns`: Optional allow-list patterns passed to
@@ -40,27 +41,29 @@ models.
 ## Example
 
 ```text
-openai/whisper-tiny
+version: v0.1.0
+model: tobil/qmd-query-expansion-1.7B-gguf
 ```
 
 ## Release Shape
 
-For a model like `openai/whisper-tiny`, the workflow creates or updates:
+For `version = v0.1.0` and `model = tobil/qmd-query-expansion-1.7B-gguf`, the
+workflow creates or updates:
 
-- release tag: `model-openai-whisper-tiny`
-- release title: `openai/whisper-tiny`
-- zip asset: `openai%2Fwhisper-tiny.zip`
+- release tag: `v0.1.0+tobil/qmd-query-expansion-1.7B-gguf`
+- release title: `v0.1.0+tobil/qmd-query-expansion-1.7B-gguf`
+- zip asset: `tobil%2Fqmd-query-expansion-1.7B-gguf.zip`
 
 ## Local Helper
 
 The workflow uses `scripts/huggingface_artifacts.py` to:
 
-- parse one model spec
+- parse the version and model spec
 - package the downloaded snapshot into a zip
 - write release metadata and notes for the workflow
 
 You can smoke-test the release mapping locally:
 
 ```powershell
-python scripts\huggingface_artifacts.py describe --model "openai/whisper-tiny@main"
+python scripts\huggingface_artifacts.py describe --version "v0.1.0" --model "tobil/qmd-query-expansion-1.7B-gguf"
 ```

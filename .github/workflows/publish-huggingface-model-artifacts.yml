@@ -3,6 +3,10 @@ name: Publish Hugging Face Release Asset
 on:
   workflow_dispatch:
     inputs:
+      version:
+        description: Release version prefix such as v0.1.0.
+        required: true
+        type: string
       model:
         description: Single Hugging Face model id. Use @revision to pin a revision.
         required: true
@@ -41,11 +45,13 @@ jobs:
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          VERSION: ${{ inputs.version }}
+          MODEL: ${{ inputs.model }}
           INCLUDE_PATTERNS: ${{ inputs.include_patterns }}
           EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
-          MODEL: ${{ inputs.model }}
         run: |
           python scripts/huggingface_artifacts.py package \
+            --version "$VERSION" \
             --model "$MODEL" \
             --destination-root "$RUNNER_TEMP/model-package" \
             --include-patterns "$INCLUDE_PATTERNS" \
