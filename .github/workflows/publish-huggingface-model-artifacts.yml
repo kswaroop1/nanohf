@@ -81,19 +81,20 @@ jobs:
           EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
         run: |
           python scripts/huggingface_artifacts.py download \
-            --repo-id "${{ matrix.model.repo_id }}" \
-            --revision "${{ matrix.model.revision }}" \
+            --repo-id "${{ matrix.repo_id }}" \
+            --revision "${{ matrix.revision }}" \
             --destination-root "$RUNNER_TEMP/huggingface-models" \
-            --storage-name "${{ matrix.model.storage_name }}" \
-            --artifact-name "${{ matrix.model.artifact_name }}" \
+            --storage-name "${{ matrix.storage_name }}" \
+            --artifact-name "${{ matrix.artifact_name }}" \
             --include-patterns "$INCLUDE_PATTERNS" \
             --exclude-patterns "$EXCLUDE_PATTERNS"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.model.artifact_name }}
+          name: ${{ matrix.artifact_name }}
           path: ${{ steps.download.outputs.artifact_path }}
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
+
