@@ -69,11 +69,31 @@ jobs:
               --notes-file "$RELEASE_NOTES_PATH"
           fi
 
-      - name: Upload release asset
+      - name: Remove old matching assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
-          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
+          ASSET_PREFIX: ${{ steps.package.outputs.asset_prefix }}
         run: |
-          gh release upload "$RELEASE_TAG" "$ASSET_PATH" --clobber
+          while IFS= read -r asset_name; do
+            [ -z "$asset_name" ] && continue
+            if [[ "$asset_name" == "$ASSET_PREFIX.zip" || "$asset_name" == "$ASSET_PREFIX.part"*.zip ]]; then
+              gh release delete-asset "$RELEASE_TAG" "$asset_name" --yes
+            fi
+          done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+          ASSET_DIR: ${{ steps.package.outputs.asset_dir }}
+        run: |
+          shopt -s nullglob
+          assets=("$ASSET_DIR"/*.zip)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "No zip assets were generated."
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}"

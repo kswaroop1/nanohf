@@ -2,15 +2,19 @@
 
 `nanohf` is a small GitHub Actions repo for downloading Hugging Face model
 snapshots, wrapping them in a predictable directory structure, and publishing
-one zip file per model as a GitHub release asset.
+one or more zip files per model as GitHub release assets.
 
 ## What It Does
 
 The manual workflow at `.github/workflows/publish-huggingface-model-artifacts.yml`
 accepts a single Hugging Face `model` id, downloads that snapshot with
-`huggingface_hub`, builds a zip whose internal layout starts with the original
-repo path, and uploads that zip to a GitHub release whose tag and title are the
-model id itself.
+`huggingface_hub`, builds one or more zips whose internal layout starts with the
+original repo path, and uploads those zips to a GitHub release whose tag and
+title are the model id itself.
+
+If the packaged content would exceed GitHub's per-asset size limit, `nanohf`
+splits oversized files into binary parts first and then creates multiple zip
+assets capped at about 1.8 GB each.
 
 Example internal zip layout for `tobil/qmd-query-expansion-1.7B-gguf`:
 
@@ -18,11 +22,12 @@ Example internal zip layout for `tobil/qmd-query-expansion-1.7B-gguf`:
 tobil/
   qmd-query-expansion-1.7B-gguf/
     huggingface-model.json
-    ...model files...
+    REASSEMBLE.txt
+    ...model files or file parts...
 ```
 
 Each run manages one model release. Re-running the same model updates that
-release and replaces its zip asset in place.
+release and replaces its zip assets in place.
 
 ## Workflow Inputs
 
@@ -36,12 +41,6 @@ release and replaces its zip asset in place.
 Add an `HF_TOKEN` repository secret if you need access to gated or private
 models.
 
-## Example
-
-```text
-model: tobil/qmd-query-expansion-1.7B-gguf
-```
-
 ## Release Shape
 
 For `model = tobil/qmd-query-expansion-1.7B-gguf`, the workflow creates or
@@ -49,14 +48,25 @@ updates:
 
 - release tag: `tobil/qmd-query-expansion-1.7B-gguf`
 - release title: `tobil/qmd-query-expansion-1.7B-gguf`
-- zip asset: `tobil%2Fqmd-query-expansion-1.7B-gguf.zip`
+- zip assets: `tobil%2Fqmd-query-expansion-1.7B-gguf.zip` or multipart assets
+  like `tobil%2Fqmd-query-expansion-1.7B-gguf.part001.zip`
+
+## Multipart Behavior
+
+- files larger than about 1.8 GB are split into `.part001`, `.part002`, and so
+  on before zipping
+- package output is then grouped into zip assets that stay under the GitHub
+  release asset size limit
+- `REASSEMBLE.txt` inside the package explains how to rebuild split files after
+  extracting all zips into the same folder
 
 ## Local Helper
 
 The workflow uses `scripts/huggingface_artifacts.py` to:
 
 - parse the model spec
-- package the downloaded snapshot into a zip
+- split oversized files when needed
+- package the result into one or more zips
 - write release metadata and notes for the workflow
 
 You can smoke-test the release mapping locally:
@@ -64,3 +74,4 @@ You can smoke-test the release mapping locally:
 ```powershell
 python scripts\huggingface_artifacts.py describe --model "tobil/qmd-query-expansion-1.7B-gguf"
 ```
+
