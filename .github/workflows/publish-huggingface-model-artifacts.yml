@@ -1,4 +1,4 @@
-name: Publish Hugging Face Release Asset
+name: Publish Hugging Face B2 Download Link
 
 on:
   workflow_dispatch:
@@ -33,21 +33,26 @@ jobs:
           cache: pip
           cache-dependency-path: scripts/requirements-huggingface-artifacts.txt
 
-      - name: Install packaging dependency
+      - name: Install helper dependencies
         run: python -m pip install -r scripts/requirements-huggingface-artifacts.txt
 
-      - name: Package model release zip
-        id: package
+      - name: Upload selected model file to Backblaze B2
+        id: publish
         shell: bash
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_PUBLIC_BASE_URL: ${{ vars.B2_PUBLIC_BASE_URL }}
+          B2_OBJECT_PREFIX: ${{ vars.B2_OBJECT_PREFIX }}
           MODEL: ${{ inputs.model }}
           INCLUDE_PATTERNS: ${{ inputs.include_patterns }}
           EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
         run: |
-          python scripts/huggingface_artifacts.py package \
+          python scripts/huggingface_artifacts.py publish \
             --model "$MODEL" \
-            --destination-root "$RUNNER_TEMP/model-package" \
+            --destination-root "$RUNNER_TEMP/model-publish" \
             --include-patterns "$INCLUDE_PATTERNS" \
             --exclude-patterns "$EXCLUDE_PATTERNS"
 
@@ -55,9 +60,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
-          RELEASE_TITLE: ${{ steps.package.outputs.release_title }}
-          RELEASE_NOTES_PATH: ${{ steps.package.outputs.release_notes_path }}
+          RELEASE_TAG: ${{ steps.publish.outputs.release_tag }}
+          RELEASE_TITLE: ${{ steps.publish.outputs.release_title }}
+          RELEASE_NOTES_PATH: ${{ steps.publish.outputs.release_notes_path }}
         run: |
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
@@ -68,32 +73,3 @@ jobs:
               --title "$RELEASE_TITLE" \
               --notes-file "$RELEASE_NOTES_PATH"
           fi
-
-      - name: Remove old matching assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
-          ASSET_PREFIX: ${{ steps.package.outputs.asset_prefix }}
-        run: |
-          while IFS= read -r asset_name; do
-            [ -z "$asset_name" ] && continue
-            if [[ "$asset_name" == "$ASSET_PREFIX.zip" || "$asset_name" == "$ASSET_PREFIX.part"*.zip ]]; then
-              gh release delete-asset "$RELEASE_TAG" "$asset_name" --yes
-            fi
-          done < <(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
-
-      - name: Upload release assets
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
-          ASSET_DIR: ${{ steps.package.outputs.asset_dir }}
-        run: |
-          shopt -s nullglob
-          assets=("$ASSET_DIR"/*.zip)
-          if [ ${#assets[@]} -eq 0 ]; then
-            echo "No zip assets were generated."
-            exit 1
-          fi
-          gh release upload "$RELEASE_TAG" "${assets[@]}"
