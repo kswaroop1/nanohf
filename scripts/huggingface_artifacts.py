@@ -737,6 +737,48 @@ def get_or_create_release(session: requests.Session, owner: str, repo_name: str,
     return update_response.json()
 
 
+def should_keep_existing_asset(asset_path: Path, existing_asset: dict[str, object]) -> tuple[bool, str]:
+    state = existing_asset.get("state")
+    if state != "uploaded":
+        return False, f"state is {state or 'unknown'}"
+
+    remote_size = existing_asset.get("size")
+    local_size = asset_path.stat().st_size
+    if not isinstance(remote_size, int):
+        return False, "remote size is missing"
+    if remote_size != local_size:
+        return False, f"size mismatch local={local_size} remote={remote_size}"
+
+    return True, "already uploaded"
+
+
+def delete_release_asset(session: requests.Session, owner: str, repo_name: str, asset_id: int) -> None:
+    delete_response = session.delete(
+        f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/assets/{asset_id}",
+        timeout=REQUEST_TIMEOUT)
+    delete_response.raise_for_status()
+
+
+def upload_release_asset(
+    session: requests.Session,
+    upload_url: str,
+    asset_path: Path,
+    index: int,
+    total: int) -> None:
+    content_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
+    label = f"Uploading asset {index}/{total} {asset_path.name}"
+    with ProgressFileReader(asset_path, label) as stream:
+        upload_response = session.post(
+            upload_url,
+            params={"name": asset_path.name},
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(asset_path.stat().st_size),
+            },
+            data=stream,
+            timeout=UPLOAD_TIMEOUT)
+    upload_response.raise_for_status()
+
 def replace_release_assets(
     session: requests.Session,
     owner: str,
@@ -750,30 +792,43 @@ def replace_release_assets(
         timeout=REQUEST_TIMEOUT)
     assets_response.raise_for_status()
     existing_assets = assets_response.json()
-    if existing_assets:
-        print_status(f"Removing {len(existing_assets)} existing release asset(s)")
+    existing_by_name: dict[str, dict[str, object]] = {}
+    duplicate_assets: list[dict[str, object]] = []
     for asset in existing_assets:
-        delete_response = session.delete(
-            f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/assets/{asset['id']}",
-            timeout=REQUEST_TIMEOUT)
-        delete_response.raise_for_status()
+        asset_name = asset.get("name")
+        if not isinstance(asset_name, str):
+            continue
+        if asset_name in existing_by_name:
+            duplicate_assets.append(asset)
+        else:
+            existing_by_name[asset_name] = asset
+
+    for asset in duplicate_assets:
+        print_status(f"Deleting duplicate release asset {asset.get('name')}")
+        delete_release_asset(session, owner, repo_name, int(asset["id"]))
 
     upload_url = str(release["upload_url"]).split("{", 1)[0]
     assets_to_upload = sorted(path for path in prepared.assets_dir.iterdir() if path.is_file())
+    local_asset_names = {path.name for path in assets_to_upload}
+
     for index, asset_path in enumerate(assets_to_upload, start=1):
-        content_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
-        label = f"Uploading asset {index}/{len(assets_to_upload)} {asset_path.name}"
-        with ProgressFileReader(asset_path, label) as stream:
-            upload_response = session.post(
-                upload_url,
-                params={"name": asset_path.name},
-                headers={
-                    "Content-Type": content_type,
-                    "Content-Length": str(asset_path.stat().st_size),
-                },
-                data=stream,
-                timeout=UPLOAD_TIMEOUT)
-        upload_response.raise_for_status()
+        existing_asset = existing_by_name.get(asset_path.name)
+        if existing_asset is not None:
+            keep_existing, reason = should_keep_existing_asset(asset_path, existing_asset)
+            if keep_existing:
+                print_status(f"Keeping existing asset {index}/{len(assets_to_upload)} {asset_path.name} ({reason})")
+                continue
+
+            print_status(f"Replacing asset {index}/{len(assets_to_upload)} {asset_path.name} ({reason})")
+            delete_release_asset(session, owner, repo_name, int(existing_asset["id"]))
+
+        upload_release_asset(session, upload_url, asset_path, index, len(assets_to_upload))
+
+    stale_asset_names = sorted(name for name in existing_by_name if name not in local_asset_names)
+    for asset_name in stale_asset_names:
+        stale_asset = existing_by_name[asset_name]
+        print_status(f"Deleting stale release asset {asset_name}")
+        delete_release_asset(session, owner, repo_name, int(stale_asset["id"]))
 
 
 def infer_github_repo() -> str:
@@ -860,4 +915,6 @@ if __name__ == "__main__":
     except ValueError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)
+
+
 

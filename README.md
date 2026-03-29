@@ -94,7 +94,9 @@ That creates an `assets` folder containing:
 
 - Release assets are uploaded directly from your machine, not from GitHub
   Actions.
-- Existing assets on the target release are replaced on each run.
+- Existing assets on the target release are reconciled on each run: already
+  uploaded matching assets are kept, missing assets are uploaded, and broken or
+  stale assets are replaced.
 - If the selected file is already below the part limit, it is uploaded as a
   single release asset using its original filename.
 - Re-running the same command against the same destination directory reuses the
