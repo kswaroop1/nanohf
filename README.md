@@ -13,7 +13,7 @@ The helper script:
 
 - resolves exactly one file from a Hugging Face model repo, or accepts an
   existing local file
-- splits the file into release assets capped at about 1.8 GB each
+- splits the file into release assets capped at about 1.8 GB each and zip-wraps the non-text payload files
 - writes `REASSEMBLE.txt`, `huggingface-model.json`, and a `.sha256` file
 - creates or updates a GitHub release and uploads those prepared assets through
   the GitHub release API
@@ -85,7 +85,7 @@ python scripts\huggingface_artifacts.py publish-release `
 
 That creates an `assets` folder containing:
 
-- the split part files, such as `...part001`, `...part002`, and so on
+- zip-wrapped payload files, such as `...part001.zip`, `...part002.zip`, or `<filename>.zip`
 - `REASSEMBLE.txt` when the file needed splitting
 - `<filename>.sha256`
 - `huggingface-model.json`
@@ -99,10 +99,12 @@ That creates an `assets` folder containing:
   stale assets are replaced.
 - GitHub authentication and repo access are validated before release work
   starts, so a bad token fails fast with a clearer error.
-- If the selected file is already below the part limit, it is uploaded as a
-  single release asset using its original filename.
+- If the selected file is already below the part limit and is binary, it is
+  uploaded as a single `.zip` containing the original filename.
 - Re-running the same command against the same destination directory reuses the
   prepared local assets if they are complete.
+- When a file is split, unzip every `*.zip` part first, then `copy /b` or `cat` the
+  extracted `...partNNN` files to reconstruct the original GGUF.
 - Use `--force-reprepare` if you want to ignore the existing prepared files and
   rebuild them from scratch.
 

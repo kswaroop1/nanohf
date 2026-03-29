@@ -14,6 +14,7 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import quote
+import zipfile
 
 import requests
 from huggingface_hub import HfApi, hf_hub_url
@@ -54,6 +55,7 @@ class SplitResult:
     sha256: str
     asset_paths: list[Path]
     was_split: bool
+    payload_assets_zipped: bool
 
 
 @dataclass(frozen=True)
@@ -457,24 +459,39 @@ def resolve_remote_size(session: requests.Session, download_url: str, token: str
 
 
 def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: int, token: str) -> SplitResult:
-    part_paths: list[Path] = []
+    asset_paths: list[Path] = []
+    raw_part_names: list[str] = []
     sha256 = hashlib.sha256()
     original_size = 0
     asset_base_name = source.selected_file
     split_mode = source.size > part_bytes
+    payload_assets_zipped = should_zip_payload_assets(source.selected_file)
     part_index = 0
     current_part_size = 0
+    current_part_path: Path | None = None
     part_stream = None
     progress = ProgressPrinter(f"Preparing {source.selected_file}", source.size)
 
     def open_next_part() -> None:
-        nonlocal part_index, current_part_size, part_stream
+        nonlocal part_index, current_part_size, current_part_path, part_stream
         part_index += 1
         part_name = f"{asset_base_name}.part{part_index:0{PART_NAME_WIDTH}d}" if split_mode else asset_base_name
-        part_path = assets_dir / part_name
-        part_stream = part_path.open("wb")
+        current_part_path = assets_dir / part_name
+        part_stream = current_part_path.open("wb")
         current_part_size = 0
-        part_paths.append(part_path)
+        raw_part_names.append(part_name)
+
+    def finalize_current_part() -> None:
+        nonlocal current_part_path, current_part_size, part_stream
+        if part_stream is None or current_part_path is None:
+            return
+
+        part_stream.close()
+        part_stream = None
+        final_part_path = zip_single_file_asset(current_part_path) if payload_assets_zipped else current_part_path
+        asset_paths.append(final_part_path)
+        current_part_path = None
+        current_part_size = 0
 
     def write_chunk(chunk: bytes) -> None:
         nonlocal current_part_size, original_size, part_stream
@@ -496,9 +513,7 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
             view = view[len(piece):]
 
             if split_mode and current_part_size == part_bytes:
-                part_stream.close()
-                part_stream = None
-                current_part_size = 0
+                finalize_current_part()
 
     try:
         if is_remote_source(source):
@@ -521,7 +536,7 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
                     write_chunk(chunk)
     finally:
         if part_stream is not None:
-            part_stream.close()
+            finalize_current_part()
         progress.finish()
 
     if original_size != source.size:
@@ -530,7 +545,11 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
 
     write_sha256_file(assets_dir, source.selected_file, sha256.hexdigest())
     if split_mode:
-        write_reassemble_instructions(assets_dir, source.selected_file, part_paths)
+        write_reassemble_instructions(
+            assets_dir,
+            source.selected_file,
+            raw_part_names,
+            payload_assets_zipped)
 
     extra_assets = [assets_dir / f"{source.selected_file}.sha256"]
     if split_mode:
@@ -539,12 +558,40 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
     return SplitResult(
         original_size=original_size,
         sha256=sha256.hexdigest(),
-        asset_paths=part_paths + extra_assets,
-        was_split=split_mode)
+        asset_paths=asset_paths + extra_assets,
+        was_split=split_mode,
+        payload_assets_zipped=payload_assets_zipped)
 
 
 def is_remote_source(source: SourceFile) -> bool:
     return source.download_url is not None
+
+
+def should_zip_payload_assets(filename: str) -> bool:
+    text_suffixes = {
+        ".cfg", ".config", ".csv", ".gql", ".graphql", ".ini", ".json", ".md",
+        ".sha256", ".toml", ".tsv", ".txt", ".xml", ".yaml", ".yml",
+    }
+    lowered_suffixes = {suffix.lower() for suffix in Path(filename).suffixes}
+    if lowered_suffixes.intersection(text_suffixes):
+        return False
+
+    guessed_type, _ = mimetypes.guess_type(filename)
+    if guessed_type:
+        return not (
+            guessed_type.startswith("text/")
+            or guessed_type in {"application/json", "application/xml", "application/yaml", "application/x-yaml"}
+        )
+
+    return True
+
+
+def zip_single_file_asset(path: Path) -> Path:
+    zip_path = path.with_name(f"{path.name}.zip")
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_STORED) as archive:
+        archive.write(path, arcname=path.name)
+    path.unlink()
+    return zip_path
 
 
 def write_sha256_file(assets_dir: Path, original_name: str, sha256: str) -> None:
@@ -552,16 +599,31 @@ def write_sha256_file(assets_dir: Path, original_name: str, sha256: str) -> None
     sha_path.write_text(f"{sha256} *{original_name}\n", encoding="utf-8")
 
 
-def write_reassemble_instructions(assets_dir: Path, original_name: str, part_paths: list[Path]) -> None:
-    part_names = [path.name for path in part_paths]
+def write_reassemble_instructions(
+    assets_dir: Path,
+    original_name: str,
+    part_names: list[str],
+    payload_assets_zipped: bool) -> None:
     windows_parts = "+".join(f'"{name}"' for name in part_names)
     unix_parts = " ".join(f'"{name}"' for name in part_names)
-    instructions = (
-        "Download every part asset into the same folder before reconstructing the original file.\n\n"
-        "Windows (PowerShell / cmd):\n"
-        f"  copy /b {windows_parts} \"{original_name}\"\n\n"
-        "Linux/macOS:\n"
-        f"  cat {unix_parts} > \"{original_name}\"\n")
+
+    if payload_assets_zipped:
+        instructions = (
+            "Download every .zip part asset into the same folder, then extract each zip before reconstructing the original file.\n\n"
+            "Windows (PowerShell):\n"
+            "  Get-ChildItem *.zip | ForEach-Object { Expand-Archive -LiteralPath $_.FullName -DestinationPath . -Force }\n"
+            f"  copy /b {windows_parts} \"{original_name}\"\n\n"
+            "Linux/macOS:\n"
+            "  for file in *.zip; do unzip -o \"$file\"; done\n"
+            f"  cat {unix_parts} > \"{original_name}\"\n")
+    else:
+        instructions = (
+            "Download every part asset into the same folder before reconstructing the original file.\n\n"
+            "Windows (PowerShell / cmd):\n"
+            f"  copy /b {windows_parts} \"{original_name}\"\n\n"
+            "Linux/macOS:\n"
+            f"  cat {unix_parts} > \"{original_name}\"\n")
+
     (assets_dir / REASSEMBLE_FILENAME).write_text(instructions, encoding="utf-8")
 
 
@@ -582,6 +644,7 @@ def build_manifest(
         "original_size": split_result.original_size,
         "sha256": split_result.sha256,
         "was_split": split_result.was_split,
+        "payload_assets_zipped": split_result.payload_assets_zipped,
         "assets": [path.name for path in split_result.asset_paths] + [MANIFEST_FILENAME],
         "include_patterns": include_patterns,
         "exclude_patterns": exclude_patterns,
@@ -609,10 +672,15 @@ def build_release_notes(target: ModelTarget, source: SourceFile, split_result: S
     lines.append(f"- `{MANIFEST_FILENAME}`")
 
     if split_result.was_split:
+        reassemble_note = (
+            "Download all `.zip` part assets plus `REASSEMBLE.txt` into the same folder, extract the `.zip` files, and follow the included commands."
+            if split_result.payload_assets_zipped
+            else "Download all part assets plus `REASSEMBLE.txt` into the same folder and follow the included commands."
+        )
         lines.extend([
             "",
             "## Reassemble",
-            "Download all part assets plus `REASSEMBLE.txt` into the same folder and follow the included commands.",
+            reassemble_note,
         ])
 
     return "\n".join(lines) + "\n"
@@ -878,7 +946,7 @@ def replace_release_assets(
         delete_release_asset(session, owner, repo_name, int(asset["id"]))
 
     upload_url = str(release["upload_url"]).split("{", 1)[0]
-    assets_to_upload = sorted(path for path in prepared.assets_dir.iterdir() if path.is_file())
+    assets_to_upload = [prepared.assets_dir / name for name in prepared.asset_names]
     local_asset_names = {path.name for path in assets_to_upload}
 
     for index, asset_path in enumerate(assets_to_upload, start=1):
