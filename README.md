@@ -114,6 +114,8 @@ That creates an `assets` folder containing:
 - Active runs now lock their destination roots. Do not use overlapping roots
   such as `C:\temp\nanohf\qwen3.5` and `C:\temp\nanohf\qwen3.5\35A3` at the
   same time; `nanohf` will reject that combination.
+- Use `--force` only if you intentionally want to ignore those locks and take
+  over the destination root anyway. That can disrupt another running publish.
 
 ## Helper Check
 

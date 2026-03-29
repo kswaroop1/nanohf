@@ -228,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-reprepare",
         action="store_true",
         help="Ignore any existing prepared assets in the destination and rebuild them.")
+    publish_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore destination-root locks and overlap checks, and take over the destination anyway.")
     publish_parser.set_defaults(handler=run_publish_release)
 
     return parser
@@ -257,7 +261,7 @@ def run_publish_release(args: argparse.Namespace) -> int:
     if not args.prepare_only and not github_token:
         raise ValueError("A GitHub token is required for upload. Set GH_TOKEN or GITHUB_TOKEN, or pass --github-token.")
 
-    lock = acquire_destination_lock(destination_root)
+    lock = acquire_destination_lock(destination_root, force=args.force)
     try:
         prepared = None if args.force_reprepare else try_load_prepared_release(
             target=target,
@@ -1028,19 +1032,25 @@ def replace_release_assets(
         delete_release_asset(session, owner, repo_name, int(stale_asset["id"]))
 
 
-def acquire_destination_lock(destination_root: Path) -> DestinationLock:
+def acquire_destination_lock(destination_root: Path, force: bool = False) -> DestinationLock:
     destination_root = destination_root.resolve()
     active_ancestor_lock = find_active_ancestor_lock(destination_root)
     if active_ancestor_lock is not None:
-        raise ValueError(
-            f"Destination root '{destination_root}' is nested inside an active nanohf workspace '{active_ancestor_lock.parent}'. "
-            "Choose a non-overlapping destination-root.")
+        if not force:
+            raise ValueError(
+                f"Destination root '{destination_root}' is nested inside an active nanohf workspace '{active_ancestor_lock.parent}'. "
+                "Choose a non-overlapping destination-root.")
+        print_status(
+            f"Forcing destination root '{destination_root}' despite active ancestor workspace '{active_ancestor_lock.parent}'.")
 
     active_descendant_lock = find_active_descendant_lock(destination_root)
     if active_descendant_lock is not None:
-        raise ValueError(
-            f"Destination root '{destination_root}' contains an active nanohf workspace '{active_descendant_lock.parent}'. "
-            "Choose a non-overlapping destination-root.")
+        if not force:
+            raise ValueError(
+                f"Destination root '{destination_root}' contains an active nanohf workspace '{active_descendant_lock.parent}'. "
+                "Choose a non-overlapping destination-root.")
+        print_status(
+            f"Forcing destination root '{destination_root}' despite active descendant workspace '{active_descendant_lock.parent}'.")
 
     destination_root.mkdir(parents=True, exist_ok=True)
     lock_path = destination_root / LOCK_FILENAME
@@ -1056,6 +1066,13 @@ def acquire_destination_lock(destination_root: Path) -> DestinationLock:
         except FileExistsError:
             if remove_stale_lock(lock_path):
                 continue
+            if force:
+                print_status(f"Forcing destination root lock takeover at {destination_root}")
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
             raise ValueError(
                 f"Destination root '{destination_root}' is already in use by another nanohf process. "
                 "Choose a different destination-root or wait for the other run to finish.")
@@ -1064,7 +1081,6 @@ def acquire_destination_lock(destination_root: Path) -> DestinationLock:
                 json.dump(lock_payload, stream, indent=2)
                 stream.write("\n")
             return DestinationLock(path=lock_path, root=destination_root)
-
 
 def release_destination_lock(lock: DestinationLock) -> None:
     try:
