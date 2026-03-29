@@ -94,6 +94,8 @@ That creates an `assets` folder containing:
 
 - Release assets are uploaded directly from your machine, not from GitHub
   Actions.
+- For remote Hugging Face sources, `nanohf` streams the file into prepared assets;
+  it does not keep a second full original download on disk.
 - Existing assets on the target release are reconciled on each run: already
   uploaded matching assets are kept, missing assets are uploaded, and broken or
   stale assets are replaced.
@@ -103,6 +105,8 @@ That creates an `assets` folder containing:
   uploaded as a single `.zip` containing the original filename.
 - Re-running the same command against the same destination directory reuses the
   prepared local assets if they are complete.
+- If a prepared local asset disappears mid-upload, `nanohf` rebuilds the local
+  asset set from the same Hugging Face model or `--file` source and retries.
 - When a file is split, unzip every `*.zip` part first, then `copy /b` or `cat` the
   extracted `...partNNN` files to reconstruct the original GGUF.
 - Use `--force-reprepare` if you want to ignore the existing prepared files and
