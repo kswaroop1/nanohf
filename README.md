@@ -26,7 +26,7 @@ download experience on GitHub Releases.
 Local machine requirements:
 
 - Python 3.12 or newer
-- a GitHub token with `contents:write` access to the target repo
+- a GitHub token with access to the target repo and `Contents: Read and write` permission
 - enough local disk for the part files you want to upload
 
 Install the helper dependencies:

@@ -763,6 +763,20 @@ def extract_github_error_message(response: requests.Response) -> str:
     return "Review the token permissions and repository access."
 
 
+def raise_github_release_error(response: requests.Response, context: str) -> None:
+    if response.status_code == 401:
+        raise ValueError(
+            "GitHub authentication failed. The token is missing, invalid, or expired. "
+            "Pass --github-token or set GH_TOKEN/GITHUB_TOKEN and try again.")
+    if response.status_code == 403:
+        detail = extract_github_error_message(response)
+        raise ValueError(
+            f"{context} failed with 403 Forbidden. {detail} "
+            "For a fine-grained PAT, make sure the token can access the repo and has Contents: Read and write.")
+
+    response.raise_for_status()
+
+
 def get_or_create_release(session: requests.Session, owner: str, repo_name: str, prepared: PreparedRelease) -> dict[str, object]:
     print_status(f"Ensuring release {prepared.release_tag}")
     encoded_tag = quote(prepared.release_tag, safe="")
@@ -777,7 +791,7 @@ def get_or_create_release(session: requests.Session, owner: str, repo_name: str,
                 "body": prepared.notes_path.read_text(encoding="utf-8"),
             },
             timeout=REQUEST_TIMEOUT)
-        create_response.raise_for_status()
+        raise_github_release_error(create_response, f"Creating release '{prepared.release_tag}'")
         return create_response.json()
 
     response.raise_for_status()
@@ -789,7 +803,7 @@ def get_or_create_release(session: requests.Session, owner: str, repo_name: str,
             "body": prepared.notes_path.read_text(encoding="utf-8"),
         },
         timeout=REQUEST_TIMEOUT)
-    update_response.raise_for_status()
+    raise_github_release_error(update_response, f"Updating release '{prepared.release_tag}'")
     return update_response.json()
 
 
@@ -812,7 +826,7 @@ def delete_release_asset(session: requests.Session, owner: str, repo_name: str, 
     delete_response = session.delete(
         f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/assets/{asset_id}",
         timeout=REQUEST_TIMEOUT)
-    delete_response.raise_for_status()
+    raise_github_release_error(delete_response, f"Deleting release asset {asset_id}")
 
 
 def upload_release_asset(
@@ -833,7 +847,7 @@ def upload_release_asset(
             },
             data=stream,
             timeout=UPLOAD_TIMEOUT)
-    upload_response.raise_for_status()
+    raise_github_release_error(upload_response, f"Uploading release asset '{asset_path.name}'")
 
 def replace_release_assets(
     session: requests.Session,
@@ -846,7 +860,7 @@ def replace_release_assets(
         f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/{release_id}/assets",
         params={"per_page": 100},
         timeout=REQUEST_TIMEOUT)
-    assets_response.raise_for_status()
+    raise_github_release_error(assets_response, f"Listing release assets for '{prepared.release_tag}'")
     existing_assets = assets_response.json()
     existing_by_name: dict[str, dict[str, object]] = {}
     duplicate_assets: list[dict[str, object]] = []
