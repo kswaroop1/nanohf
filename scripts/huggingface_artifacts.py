@@ -25,6 +25,8 @@ DEFAULT_PART_BYTES = 1_800_000_000
 PART_NAME_WIDTH = 3
 REQUEST_TIMEOUT = (30, 300)
 UPLOAD_TIMEOUT = (30, 900)
+DELETE_RETRY_COUNT = 10
+DELETE_RETRY_DELAY_SECONDS = 0.2
 MANIFEST_FILENAME = "huggingface-model.json"
 REASSEMBLE_FILENAME = "REASSEMBLE.txt"
 GITHUB_API_URL = "https://api.github.com"
@@ -586,11 +588,27 @@ def should_zip_payload_assets(filename: str) -> bool:
     return True
 
 
+def delete_path_with_retries(path: Path) -> None:
+    last_error: PermissionError | None = None
+    for attempt in range(DELETE_RETRY_COUNT):
+        try:
+            path.unlink()
+            return
+        except PermissionError as error:
+            last_error = error
+            if attempt == DELETE_RETRY_COUNT - 1:
+                break
+            time.sleep(DELETE_RETRY_DELAY_SECONDS)
+
+    if last_error is not None:
+        raise last_error
+
+
 def zip_single_file_asset(path: Path) -> Path:
     zip_path = path.with_name(f"{path.name}.zip")
     with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_STORED) as archive:
         archive.write(path, arcname=path.name)
-    path.unlink()
+    delete_path_with_retries(path)
     return zip_path
 
 
