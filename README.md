@@ -111,6 +111,9 @@ That creates an `assets` folder containing:
   extracted `...partNNN` files to reconstruct the original GGUF.
 - Use `--force-reprepare` if you want to ignore the existing prepared files and
   rebuild them from scratch.
+- Active runs now lock their destination roots. Do not use overlapping roots
+  such as `C:\temp\nanohf\qwen3.5` and `C:\temp\nanohf\qwen3.5\35A3` at the
+  same time; `nanohf` will reject that combination.
 
 ## Helper Check
 

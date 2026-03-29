@@ -31,6 +31,7 @@ MANIFEST_FILENAME = "huggingface-model.json"
 REASSEMBLE_FILENAME = "REASSEMBLE.txt"
 GITHUB_API_URL = "https://api.github.com"
 GITHUB_API_VERSION = "2026-03-10"
+LOCK_FILENAME = ".nanohf.lock"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,12 @@ class SplitResult:
     asset_paths: list[Path]
     was_split: bool
     payload_assets_zipped: bool
+
+
+@dataclass(frozen=True)
+class DestinationLock:
+    path: Path
+    root: Path
 
 
 @dataclass(frozen=True)
@@ -250,35 +257,17 @@ def run_publish_release(args: argparse.Namespace) -> int:
     if not args.prepare_only and not github_token:
         raise ValueError("A GitHub token is required for upload. Set GH_TOKEN or GITHUB_TOKEN, or pass --github-token.")
 
-    prepared = None if args.force_reprepare else try_load_prepared_release(
-        target=target,
-        destination_root=destination_root,
-        include_patterns=include_patterns,
-        exclude_patterns=exclude_patterns,
-        local_file=local_file,
-        part_bytes=args.part_bytes)
-
-    if prepared is None:
-        prepared = prepare_release_assets(
+    lock = acquire_destination_lock(destination_root)
+    try:
+        prepared = None if args.force_reprepare else try_load_prepared_release(
             target=target,
             destination_root=destination_root,
             include_patterns=include_patterns,
             exclude_patterns=exclude_patterns,
             local_file=local_file,
-            part_bytes=args.part_bytes,
-            token=token)
-    else:
-        print_status(f"Reusing prepared assets from {prepared.assets_dir}")
+            part_bytes=args.part_bytes)
 
-    if not args.prepare_only:
-        repo = github_repo or infer_github_repo()
-        print_status(f"Uploading prepared assets to GitHub release {prepared.release_tag} in {repo}")
-        try:
-            publish_prepared_release(prepared, repo, github_token)
-        except FileNotFoundError as error:
-            missing_path = error.filename or str(error)
-            print_status(
-                f"Prepared asset missing during upload ({missing_path}); rebuilding local assets and retrying once.")
+        if prepared is None:
             prepared = prepare_release_assets(
                 target=target,
                 destination_root=destination_root,
@@ -287,21 +276,42 @@ def run_publish_release(args: argparse.Namespace) -> int:
                 local_file=local_file,
                 part_bytes=args.part_bytes,
                 token=token)
-            publish_prepared_release(prepared, repo, github_token)
+        else:
+            print_status(f"Reusing prepared assets from {prepared.assets_dir}")
 
-    github_output = os.getenv("GITHUB_OUTPUT")
-    if github_output:
-        with open(github_output, "a", encoding="utf-8", newline="\n") as stream:
-            stream.write(f"release_tag={prepared.release_tag}\n")
-            stream.write(f"release_title={prepared.release_title}\n")
-            stream.write(f"release_notes_path={prepared.notes_path.as_posix()}\n")
-            stream.write(f"assets_dir={prepared.assets_dir.as_posix()}\n")
-            stream.write(f"sha256={prepared.sha256}\n")
-            stream.write(f"selected_file={prepared.selected_file}\n")
+        if not args.prepare_only:
+            repo = github_repo or infer_github_repo()
+            print_status(f"Uploading prepared assets to GitHub release {prepared.release_tag} in {repo}")
+            try:
+                publish_prepared_release(prepared, repo, github_token)
+            except FileNotFoundError as error:
+                missing_path = error.filename or str(error)
+                print_status(
+                    f"Prepared asset missing during upload ({missing_path}); rebuilding local assets and retrying once.")
+                prepared = prepare_release_assets(
+                    target=target,
+                    destination_root=destination_root,
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                    local_file=local_file,
+                    part_bytes=args.part_bytes,
+                    token=token)
+                publish_prepared_release(prepared, repo, github_token)
 
-    print(prepared.assets_dir)
-    return 0
+        github_output = os.getenv("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a", encoding="utf-8", newline="\n") as stream:
+                stream.write(f"release_tag={prepared.release_tag}\n")
+                stream.write(f"release_title={prepared.release_title}\n")
+                stream.write(f"release_notes_path={prepared.notes_path.as_posix()}\n")
+                stream.write(f"assets_dir={prepared.assets_dir.as_posix()}\n")
+                stream.write(f"sha256={prepared.sha256}\n")
+                stream.write(f"selected_file={prepared.selected_file}\n")
 
+        print(prepared.assets_dir)
+        return 0
+    finally:
+        release_destination_lock(lock)
 
 def prepare_release_assets(
     target: ModelTarget,
@@ -1018,6 +1028,99 @@ def replace_release_assets(
         delete_release_asset(session, owner, repo_name, int(stale_asset["id"]))
 
 
+def acquire_destination_lock(destination_root: Path) -> DestinationLock:
+    destination_root = destination_root.resolve()
+    active_ancestor_lock = find_active_ancestor_lock(destination_root)
+    if active_ancestor_lock is not None:
+        raise ValueError(
+            f"Destination root '{destination_root}' is nested inside an active nanohf workspace '{active_ancestor_lock.parent}'. "
+            "Choose a non-overlapping destination-root.")
+
+    active_descendant_lock = find_active_descendant_lock(destination_root)
+    if active_descendant_lock is not None:
+        raise ValueError(
+            f"Destination root '{destination_root}' contains an active nanohf workspace '{active_descendant_lock.parent}'. "
+            "Choose a non-overlapping destination-root.")
+
+    destination_root.mkdir(parents=True, exist_ok=True)
+    lock_path = destination_root / LOCK_FILENAME
+    lock_payload = {
+        "pid": os.getpid(),
+        "root": str(destination_root),
+        "created_at": int(time.time()),
+    }
+
+    while True:
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            if remove_stale_lock(lock_path):
+                continue
+            raise ValueError(
+                f"Destination root '{destination_root}' is already in use by another nanohf process. "
+                "Choose a different destination-root or wait for the other run to finish.")
+        else:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                json.dump(lock_payload, stream, indent=2)
+                stream.write("\n")
+            return DestinationLock(path=lock_path, root=destination_root)
+
+
+def release_destination_lock(lock: DestinationLock) -> None:
+    try:
+        if lock.path.exists():
+            lock.path.unlink()
+    except OSError:
+        pass
+
+
+def find_active_ancestor_lock(destination_root: Path) -> Path | None:
+    for ancestor in destination_root.parents:
+        lock_path = ancestor / LOCK_FILENAME
+        if lock_path.exists() and not remove_stale_lock(lock_path):
+            return lock_path
+    return None
+
+
+def find_active_descendant_lock(destination_root: Path) -> Path | None:
+    if not destination_root.exists():
+        return None
+
+    for lock_path in destination_root.rglob(LOCK_FILENAME):
+        if lock_path == destination_root / LOCK_FILENAME:
+            continue
+        if not remove_stale_lock(lock_path):
+            return lock_path
+    return None
+
+
+def remove_stale_lock(lock_path: Path) -> bool:
+    if is_lock_active(lock_path):
+        return False
+
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def is_lock_active(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return False
+
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
 def infer_github_repo() -> str:
     result = subprocess.run(
         ["git", "config", "--get", "remote.origin.url"],
@@ -1050,6 +1153,8 @@ def validate_release_tag(release_tag: str) -> None:
 def ensure_clean_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     for child in path.iterdir():
+        if child.name == LOCK_FILENAME:
+            continue
         if child.is_dir():
             for nested in sorted(child.rglob("*"), reverse=True):
                 if nested.is_dir():
