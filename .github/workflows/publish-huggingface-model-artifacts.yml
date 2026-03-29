@@ -1,26 +1,14 @@
-name: Publish Hugging Face B2 Download Link
+name: Validate nanohf helper
 
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
-    inputs:
-      model:
-        description: Single Hugging Face model id. Use @revision to pin a revision.
-        required: true
-        type: string
-      include_patterns:
-        description: Optional allow-list patterns, comma- or newline-separated.
-        required: false
-        type: string
-      exclude_patterns:
-        description: Optional deny-list patterns, comma- or newline-separated.
-        required: false
-        type: string
-
-permissions:
-  contents: write
 
 jobs:
-  publish:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -36,40 +24,8 @@ jobs:
       - name: Install helper dependencies
         run: python -m pip install -r scripts/requirements-huggingface-artifacts.txt
 
-      - name: Upload selected model file to Backblaze B2
-        id: publish
-        shell: bash
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          B2_APPLICATION_KEY_ID: ${{ secrets.B2_APPLICATION_KEY_ID }}
-          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
-          B2_PUBLIC_BASE_URL: ${{ vars.B2_PUBLIC_BASE_URL }}
-          B2_OBJECT_PREFIX: ${{ vars.B2_OBJECT_PREFIX }}
-          MODEL: ${{ inputs.model }}
-          INCLUDE_PATTERNS: ${{ inputs.include_patterns }}
-          EXCLUDE_PATTERNS: ${{ inputs.exclude_patterns }}
-        run: |
-          python scripts/huggingface_artifacts.py publish \
-            --model "$MODEL" \
-            --destination-root "$RUNNER_TEMP/model-publish" \
-            --include-patterns "$INCLUDE_PATTERNS" \
-            --exclude-patterns "$EXCLUDE_PATTERNS"
+      - name: Validate helper syntax
+        run: python -m compileall scripts/huggingface_artifacts.py
 
-      - name: Ensure release exists
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.publish.outputs.release_tag }}
-          RELEASE_TITLE: ${{ steps.publish.outputs.release_title }}
-          RELEASE_NOTES_PATH: ${{ steps.publish.outputs.release_notes_path }}
-        run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes-file "$RELEASE_NOTES_PATH"
-          else
-            gh release create "$RELEASE_TAG" \
-              --title "$RELEASE_TITLE" \
-              --notes-file "$RELEASE_NOTES_PATH"
-          fi
+      - name: Validate release mapping
+        run: python scripts/huggingface_artifacts.py describe --model "tobil/qmd-query-expansion-1.7B-gguf"
