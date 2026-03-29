@@ -687,6 +687,8 @@ def publish_prepared_release(prepared: PreparedRelease, github_repo: str, github
     owner, repo_name = split_github_repo(github_repo)
     with requests.Session() as session:
         session.headers.update(build_github_headers(github_token))
+        login = validate_github_session(session, owner, repo_name)
+        print_status(f"Authenticated to GitHub as {login}")
         release = get_or_create_release(session, owner, repo_name, prepared)
         replace_release_assets(session, owner, repo_name, release, prepared)
 
@@ -705,6 +707,60 @@ def build_github_headers(token: str) -> dict[str, str]:
         "X-GitHub-Api-Version": GITHUB_API_VERSION,
         "User-Agent": "nanohf/1",
     }
+
+
+def validate_github_session(session: requests.Session, owner: str, repo_name: str) -> str:
+    login = validate_github_token(session)
+    validate_github_repo_access(session, owner, repo_name)
+    return login
+
+
+def validate_github_token(session: requests.Session) -> str:
+    response = session.get(f"{GITHUB_API_URL}/user", timeout=REQUEST_TIMEOUT)
+    if response.status_code == 401:
+        raise ValueError(
+            "GitHub authentication failed. The token is missing, invalid, or expired. "
+            "Pass --github-token or set GH_TOKEN/GITHUB_TOKEN and try again.")
+    if response.status_code == 403:
+        detail = extract_github_error_message(response)
+        raise ValueError(
+            "GitHub rejected the token validation request with 403 Forbidden. "
+            f"{detail}")
+
+    response.raise_for_status()
+    payload = response.json()
+    login = payload.get("login")
+    if isinstance(login, str) and login:
+        return login
+    return "authenticated user"
+
+
+def validate_github_repo_access(session: requests.Session, owner: str, repo_name: str) -> None:
+    response = session.get(f"{GITHUB_API_URL}/repos/{owner}/{repo_name}", timeout=REQUEST_TIMEOUT)
+    if response.status_code == 404:
+        raise ValueError(
+            f"GitHub repo '{owner}/{repo_name}' was not found or the token cannot access it. "
+            "Check the repo name and token access, then try again.")
+    if response.status_code == 403:
+        detail = extract_github_error_message(response)
+        raise ValueError(
+            f"GitHub denied access to '{owner}/{repo_name}' with 403 Forbidden. {detail}")
+
+    response.raise_for_status()
+
+
+def extract_github_error_message(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if isinstance(payload, dict):
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+    return "Review the token permissions and repository access."
 
 
 def get_or_create_release(session: requests.Session, owner: str, repo_name: str, prepared: PreparedRelease) -> dict[str, object]:
@@ -915,6 +971,3 @@ if __name__ == "__main__":
     except ValueError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)
-
-
-

@@ -97,6 +97,8 @@ That creates an `assets` folder containing:
 - Existing assets on the target release are reconciled on each run: already
   uploaded matching assets are kept, missing assets are uploaded, and broken or
   stale assets are replaced.
+- GitHub authentication and repo access are validated before release work
+  starts, so a bad token fails fast with a clearer error.
 - If the selected file is already below the part limit, it is uploaded as a
   single release asset using its original filename.
 - Re-running the same command against the same destination directory reuses the
@@ -111,4 +113,3 @@ You can still smoke-test the model-to-release mapping locally:
 ```powershell
 python scripts\huggingface_artifacts.py describe --model "tobil/qmd-query-expansion-1.7B-gguf"
 ```
-
