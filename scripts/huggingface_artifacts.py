@@ -213,6 +213,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--prepare-only",
         action="store_true",
         help="Prepare local assets and release notes but do not upload them.")
+    publish_parser.add_argument(
+        "--force-reprepare",
+        action="store_true",
+        help="Ignore any existing prepared assets in the destination and rebuild them.")
     publish_parser.set_defaults(handler=run_publish_release)
 
     return parser
@@ -242,33 +246,55 @@ def run_publish_release(args: argparse.Namespace) -> int:
     if not args.prepare_only and not github_token:
         raise ValueError("A GitHub token is required for upload. Set GH_TOKEN or GITHUB_TOKEN, or pass --github-token.")
 
-    ensure_clean_directory(destination_root)
-    assets_dir = destination_root / "assets"
-    assets_dir.mkdir(parents=True, exist_ok=True)
+    prepared = None if args.force_reprepare else try_load_prepared_release(
+        target=target,
+        destination_root=destination_root,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
+        local_file=local_file,
+        part_bytes=args.part_bytes)
 
-    source = resolve_source_file(target, local_file, include_patterns, exclude_patterns, token)
-    print_status(f"Preparing {source.selected_file} ({format_bytes(source.size)})")
-    split_result = split_source_into_assets(source, assets_dir, args.part_bytes, token)
-    print_status(f"Prepared {len(split_result.asset_paths)} asset file(s) in {assets_dir}")
-    notes_path = destination_root / "release-notes.md"
-    notes_path.write_text(build_release_notes(target, source, split_result), encoding="utf-8")
-    manifest_path = assets_dir / MANIFEST_FILENAME
-    manifest_path.write_text(json.dumps(build_manifest(target, source, split_result), indent=2) + "\n", encoding="utf-8")
+    if prepared is None:
+        ensure_clean_directory(destination_root)
+        assets_dir = destination_root / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
 
-    prepared = PreparedRelease(
-        release_tag=target.release_tag,
-        release_title=target.release_title,
-        source_model=target.model,
-        source_repo_id=target.repo_id,
-        selected_file=source.selected_file,
-        resolved_revision=source.resolved_revision,
-        original_size=split_result.original_size,
-        sha256=split_result.sha256,
-        part_bytes=args.part_bytes,
-        asset_names=[path.name for path in split_result.asset_paths] + [MANIFEST_FILENAME],
-        notes_path=notes_path,
-        manifest_path=manifest_path,
-        assets_dir=assets_dir)
+        source = resolve_source_file(target, local_file, include_patterns, exclude_patterns, token)
+        print_status(f"Preparing {source.selected_file} ({format_bytes(source.size)})")
+        split_result = split_source_into_assets(source, assets_dir, args.part_bytes, token)
+        print_status(f"Prepared {len(split_result.asset_paths)} asset file(s) in {assets_dir}")
+        notes_path = destination_root / "release-notes.md"
+        notes_path.write_text(build_release_notes(target, source, split_result), encoding="utf-8")
+        manifest_path = assets_dir / MANIFEST_FILENAME
+        manifest_path.write_text(
+            json.dumps(
+                build_manifest(
+                    target=target,
+                    source=source,
+                    split_result=split_result,
+                    include_patterns=include_patterns,
+                    exclude_patterns=exclude_patterns,
+                    local_file=local_file,
+                    part_bytes=args.part_bytes),
+                indent=2) + "\n",
+            encoding="utf-8")
+
+        prepared = PreparedRelease(
+            release_tag=target.release_tag,
+            release_title=target.release_title,
+            source_model=target.model,
+            source_repo_id=target.repo_id,
+            selected_file=source.selected_file,
+            resolved_revision=source.resolved_revision,
+            original_size=split_result.original_size,
+            sha256=split_result.sha256,
+            part_bytes=args.part_bytes,
+            asset_names=[path.name for path in split_result.asset_paths] + [MANIFEST_FILENAME],
+            notes_path=notes_path,
+            manifest_path=manifest_path,
+            assets_dir=assets_dir)
+    else:
+        print_status(f"Reusing prepared assets from {prepared.assets_dir}")
 
     if not args.prepare_only:
         repo = github_repo or infer_github_repo()
@@ -539,7 +565,14 @@ def write_reassemble_instructions(assets_dir: Path, original_name: str, part_pat
     (assets_dir / REASSEMBLE_FILENAME).write_text(instructions, encoding="utf-8")
 
 
-def build_manifest(target: ModelTarget, source: SourceFile, split_result: SplitResult) -> dict[str, object]:
+def build_manifest(
+    target: ModelTarget,
+    source: SourceFile,
+    split_result: SplitResult,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+    local_file: str,
+    part_bytes: int) -> dict[str, object]:
     return {
         "model": target.model,
         "repo_id": target.repo_id,
@@ -550,6 +583,11 @@ def build_manifest(target: ModelTarget, source: SourceFile, split_result: SplitR
         "sha256": split_result.sha256,
         "was_split": split_result.was_split,
         "assets": [path.name for path in split_result.asset_paths] + [MANIFEST_FILENAME],
+        "include_patterns": include_patterns,
+        "exclude_patterns": exclude_patterns,
+        "source_mode": "local-file" if local_file else "huggingface",
+        "source_path": str(Path(local_file).expanduser().resolve()) if local_file else None,
+        "part_bytes": part_bytes,
     }
 
 
@@ -578,6 +616,71 @@ def build_release_notes(target: ModelTarget, source: SourceFile, split_result: S
         ])
 
     return "\n".join(lines) + "\n"
+
+
+def try_load_prepared_release(
+    target: ModelTarget,
+    destination_root: Path,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+    local_file: str,
+    part_bytes: int) -> PreparedRelease | None:
+    assets_dir = destination_root / "assets"
+    notes_path = destination_root / "release-notes.md"
+    manifest_path = assets_dir / MANIFEST_FILENAME
+    if not notes_path.is_file() or not manifest_path.is_file():
+        return None
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+    if manifest.get("model") != target.model:
+        return None
+    if manifest.get("repo_id") != target.repo_id:
+        return None
+    if manifest.get("requested_revision") != (target.revision or None):
+        return None
+    if manifest.get("part_bytes") != part_bytes:
+        return None
+    if manifest.get("include_patterns") != include_patterns:
+        return None
+    if manifest.get("exclude_patterns") != exclude_patterns:
+        return None
+
+    expected_source_mode = "local-file" if local_file else "huggingface"
+    if manifest.get("source_mode") != expected_source_mode:
+        return None
+    if local_file and manifest.get("source_path") != str(Path(local_file).expanduser().resolve()):
+        return None
+
+    asset_names = manifest.get("assets")
+    if not isinstance(asset_names, list) or not asset_names:
+        return None
+    if any(not isinstance(name, str) or not (assets_dir / name).is_file() for name in asset_names):
+        return None
+
+    original_size = manifest.get("original_size")
+    sha256 = manifest.get("sha256")
+    selected_file = manifest.get("selected_file")
+    if not isinstance(original_size, int) or not isinstance(sha256, str) or not isinstance(selected_file, str):
+        return None
+
+    return PreparedRelease(
+        release_tag=target.release_tag,
+        release_title=target.release_title,
+        source_model=target.model,
+        source_repo_id=target.repo_id,
+        selected_file=selected_file,
+        resolved_revision=manifest.get("resolved_revision"),
+        original_size=original_size,
+        sha256=sha256,
+        part_bytes=part_bytes,
+        asset_names=asset_names,
+        notes_path=notes_path,
+        manifest_path=manifest_path,
+        assets_dir=assets_dir)
 
 
 def publish_prepared_release(prepared: PreparedRelease, github_repo: str, github_token: str) -> None:
@@ -757,6 +860,4 @@ if __name__ == "__main__":
     except ValueError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)
-
-
 

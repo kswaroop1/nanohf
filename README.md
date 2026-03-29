@@ -97,6 +97,10 @@ That creates an `assets` folder containing:
 - Existing assets on the target release are replaced on each run.
 - If the selected file is already below the part limit, it is uploaded as a
   single release asset using its original filename.
+- Re-running the same command against the same destination directory reuses the
+  prepared local assets if they are complete.
+- Use `--force-reprepare` if you want to ignore the existing prepared files and
+  rebuild them from scratch.
 
 ## Helper Check
 
@@ -105,3 +109,4 @@ You can still smoke-test the model-to-release mapping locally:
 ```powershell
 python scripts\huggingface_artifacts.py describe --model "tobil/qmd-query-expansion-1.7B-gguf"
 ```
+
