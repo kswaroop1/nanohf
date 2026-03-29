@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import quote
@@ -70,6 +71,82 @@ class PreparedRelease:
     notes_path: Path
     manifest_path: Path
     assets_dir: Path
+
+
+class ProgressPrinter:
+    def __init__(self, label: str, total: int | None = None) -> None:
+        self.label = label
+        self.total = total
+        self.current = 0
+        self.last_render_at = 0.0
+        self.last_render_text = ""
+        self.started = False
+
+    def update(self, increment: int) -> None:
+        self.current += increment
+        self.render(force=self.total is not None and self.current >= self.total)
+
+    def render(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self.started and now - self.last_render_at < 0.25:
+            return
+
+        if self.total and self.total > 0:
+            percent = min(100.0, (self.current / self.total) * 100.0)
+            text = f"{self.label}: {percent:5.1f}% ({format_bytes(self.current)}/{format_bytes(self.total)})"
+        elif self.total == 0:
+            text = f"{self.label}: 100.0% (0 bytes)"
+        else:
+            text = f"{self.label}: {format_bytes(self.current)}"
+
+        padding = ""
+        if len(self.last_render_text) > len(text):
+            padding = " " * (len(self.last_render_text) - len(text))
+
+        sys.stderr.write("\r" + text + padding)
+        sys.stderr.flush()
+        self.last_render_at = now
+        self.last_render_text = text
+        self.started = True
+
+    def finish(self) -> None:
+        if not (self.started and self.total is not None and self.current >= self.total):
+            self.render(force=True)
+        if self.started:
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+
+class ProgressFileReader:
+    def __init__(self, path: Path, label: str) -> None:
+        self.path = path
+        self.stream = path.open("rb")
+        self.progress = ProgressPrinter(label, path.stat().st_size)
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.stream.read(size)
+        if chunk:
+            self.progress.update(len(chunk))
+        return chunk
+
+    def __len__(self) -> int:
+        return self.path.stat().st_size
+
+    def tell(self) -> int:
+        return self.stream.tell()
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self.stream.seek(offset, whence)
+
+    def close(self) -> None:
+        self.stream.close()
+        self.progress.finish()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 def main() -> int:
@@ -170,7 +247,9 @@ def run_publish_release(args: argparse.Namespace) -> int:
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     source = resolve_source_file(target, local_file, include_patterns, exclude_patterns, token)
+    print_status(f"Preparing {source.selected_file} ({format_bytes(source.size)})")
     split_result = split_source_into_assets(source, assets_dir, args.part_bytes, token)
+    print_status(f"Prepared {len(split_result.asset_paths)} asset file(s) in {assets_dir}")
     notes_path = destination_root / "release-notes.md"
     notes_path.write_text(build_release_notes(target, source, split_result), encoding="utf-8")
     manifest_path = assets_dir / MANIFEST_FILENAME
@@ -193,6 +272,7 @@ def run_publish_release(args: argparse.Namespace) -> int:
 
     if not args.prepare_only:
         repo = github_repo or infer_github_repo()
+        print_status(f"Uploading prepared assets to GitHub release {prepared.release_tag} in {repo}")
         publish_prepared_release(prepared, repo, github_token)
 
     github_output = os.getenv("GITHUB_OUTPUT")
@@ -359,6 +439,7 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
     part_index = 0
     current_part_size = 0
     part_stream = None
+    progress = ProgressPrinter(f"Preparing {source.selected_file}", source.size)
 
     def open_next_part() -> None:
         nonlocal part_index, current_part_size, part_stream
@@ -376,6 +457,7 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
 
         sha256.update(chunk)
         original_size += len(chunk)
+        progress.update(len(chunk))
         view = memoryview(chunk)
         while view:
             if part_stream is None:
@@ -414,6 +496,7 @@ def split_source_into_assets(source: SourceFile, assets_dir: Path, part_bytes: i
     finally:
         if part_stream is not None:
             part_stream.close()
+        progress.finish()
 
     if original_size != source.size:
         raise ValueError(
@@ -522,6 +605,7 @@ def build_github_headers(token: str) -> dict[str, str]:
 
 
 def get_or_create_release(session: requests.Session, owner: str, repo_name: str, prepared: PreparedRelease) -> dict[str, object]:
+    print_status(f"Ensuring release {prepared.release_tag}")
     encoded_tag = quote(prepared.release_tag, safe="")
     release_url = f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/tags/{encoded_tag}"
     response = session.get(release_url, timeout=REQUEST_TIMEOUT)
@@ -562,20 +646,28 @@ def replace_release_assets(
         params={"per_page": 100},
         timeout=REQUEST_TIMEOUT)
     assets_response.raise_for_status()
-    for asset in assets_response.json():
+    existing_assets = assets_response.json()
+    if existing_assets:
+        print_status(f"Removing {len(existing_assets)} existing release asset(s)")
+    for asset in existing_assets:
         delete_response = session.delete(
             f"{GITHUB_API_URL}/repos/{owner}/{repo_name}/releases/assets/{asset['id']}",
             timeout=REQUEST_TIMEOUT)
         delete_response.raise_for_status()
 
     upload_url = str(release["upload_url"]).split("{", 1)[0]
-    for asset_path in sorted(path for path in prepared.assets_dir.iterdir() if path.is_file()):
+    assets_to_upload = sorted(path for path in prepared.assets_dir.iterdir() if path.is_file())
+    for index, asset_path in enumerate(assets_to_upload, start=1):
         content_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
-        with open(asset_path, "rb") as stream:
+        label = f"Uploading asset {index}/{len(assets_to_upload)} {asset_path.name}"
+        with ProgressFileReader(asset_path, label) as stream:
             upload_response = session.post(
                 upload_url,
                 params={"name": asset_path.name},
-                headers={"Content-Type": content_type},
+                headers={
+                    "Content-Type": content_type,
+                    "Content-Length": str(asset_path.stat().st_size),
+                },
                 data=stream,
                 timeout=UPLOAD_TIMEOUT)
         upload_response.raise_for_status()
@@ -624,6 +716,10 @@ def ensure_clean_directory(path: Path) -> None:
             child.unlink()
 
 
+def print_status(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
+
 def normalize_optional(value: str | None) -> str:
     return value.strip() if value else ""
 
@@ -661,3 +757,6 @@ if __name__ == "__main__":
     except ValueError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)
+
+
+
